@@ -1,0 +1,7 @@
+{
+  "memtable_capacity": 10,
+  "memtable_type": "skiplist",
+  "wal_segment_size": 4096,
+  "summary_sparsity": 5,
+  "cache_size": 100
+}
