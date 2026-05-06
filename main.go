@@ -4,18 +4,28 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/Stiroki/Key-Value-Engine/config"
-	// Prilagodi putanju ako se razlikuje u go.mod
+	"github.com/Stiroki/Key-Value-Engine/wal"
 )
 
 func main() {
-	// Pokušavamo da učitamo konfiguraciju, test
-	cfg, err := config.LoadConfig("config/config.json")
+	fmt.Println("Pokusavam da procitam prethodno sacuvane WAL fajlove...")
+
+	// Pozivamo funkciju za citanje svih zapisa
+	records, err := wal.ReadAll("data/wal")
 	if err != nil {
-		log.Fatalf("Greska pri ucitavanju konfiguracije: %v", err)
+		log.Fatalf("Greska pri citanju WAL-a: %v", err)
 	}
 
-	fmt.Println("Konfiguracija uspesno ucitana!")
-	fmt.Printf("Kapacitet Memtable-a je: %d\n", cfg.MemtableCapacity)
-	fmt.Printf("Tip Memtable-a je: %s\n", cfg.MemtableType)
+	if len(records) == 0 {
+		fmt.Println("Nije pronadjen nijedan zapis. (Da nisi obrisala folder?)")
+		return
+	}
+
+	fmt.Printf("Uspesno procitano %d zapisa!\n\n", len(records))
+
+	// Ispisujemo svaki zapis da se uverimo da podaci nisu osteceni
+	for i, rec := range records {
+		fmt.Printf("Zapis %d: Kljuc='%s', Vrednost='%s', Obrisano=%t\n",
+			i+1, rec.Key, string(rec.Value), rec.Tombstone)
+	}
 }
