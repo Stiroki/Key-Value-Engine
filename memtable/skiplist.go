@@ -23,7 +23,6 @@ type SkipList struct {
 
 // NewSkipList kreira novu praznu Skip listu
 func NewSkipList() *SkipList {
-	// Inicijalizujemo generator slučajnih brojeva
 	rand.Seed(time.Now().UnixNano())
 	return &SkipList{
 		head:  &SkipListNode{Forward: make([]*SkipListNode, maxLevel)},
@@ -32,7 +31,7 @@ func NewSkipList() *SkipList {
 	}
 }
 
-// randomLevel odlucuje na koliko nivoa ce se cvor "podici"
+// randomLevel odlucuje na koliko nivoa ce se cvor podici, bazirano na verovatnoci p
 func (sl *SkipList) randomLevel() int {
 	lvl := 1
 	for rand.Float32() < p && lvl < maxLevel {
@@ -45,7 +44,7 @@ func (sl *SkipList) Put(record *model.Record) {
 	update := make([]*SkipListNode, maxLevel)
 	curr := sl.head
 
-	// Tražimo poziciju za ubacivanje na svakom nivou
+	// Trazimo poziciju za ubacivanje na svakom nivou
 	for i := sl.level - 1; i >= 0; i-- {
 		for curr.Forward[i] != nil && curr.Forward[i].Record.Key < record.Key {
 			curr = curr.Forward[i]
@@ -55,7 +54,7 @@ func (sl *SkipList) Put(record *model.Record) {
 
 	curr = curr.Forward[0]
 
-	// Ako kljuc vec postoji u memoriji, samo azuriramo zapis (npr. pri brisanju - Tombstone)
+	// Ako kljuc vec postoji u memoriji, samo azuriramo zapis i ne pravimo novi cvor
 	if curr != nil && curr.Record.Key == record.Key {
 		curr.Record = record
 		return
@@ -97,7 +96,7 @@ func (sl *SkipList) Get(key string) (*model.Record, bool) {
 	return nil, false
 }
 
-// GetAll vraca sve zapise koji su VEC SORTIRANI (prednost Skip liste!)
+// GetAll vraca sve zapise
 func (sl *SkipList) GetAll() []*model.Record {
 	var records []*model.Record
 	curr := sl.head.Forward[0]

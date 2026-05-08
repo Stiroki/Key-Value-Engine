@@ -6,12 +6,11 @@ import (
 	"github.com/Stiroki/Key-Value-Engine/model"
 )
 
-// HashMap je prva od 3 implementacije Memtable struktura
 type HashMap struct {
 	data map[string]*model.Record
 }
 
-// NewHashMap kreira i vraća novu Hash mapu
+// NewHashMap kreira i vraca novu Hash mapu
 func NewHashMap() *HashMap {
 	return &HashMap{
 		data: make(map[string]*model.Record),
@@ -35,8 +34,7 @@ func (hm *HashMap) Clear() {
 	hm.data = make(map[string]*model.Record)
 }
 
-// GetAll mora da vrati zapise SORTIRANE po ključu.
-// Ovo je ključno jer SSTabele na disku zahtevaju sortirane podatke!
+// GetAll vraca sve sortirane po kljucevima
 func (hm *HashMap) GetAll() []*model.Record {
 	var records []*model.Record
 	var keys []string
@@ -45,7 +43,6 @@ func (hm *HashMap) GetAll() []*model.Record {
 		keys = append(keys, key)
 	}
 
-	// Hash mapa ne čuva redosled, pa moramo ručno da sortiramo ključeve
 	sort.Strings(keys)
 
 	for _, key := range keys {

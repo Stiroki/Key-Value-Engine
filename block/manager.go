@@ -7,13 +7,13 @@ import (
 	"github.com/Stiroki/Key-Value-Engine/cache"
 )
 
-// BlockManager upravlja čitanjem i pisanjem blokova podataka
+// Blockmanager je centralna komponenta koja upravlja citanjem i pisanjem blokova na disk
 type BlockManager struct {
 	BlockSize int
 	Cache     *cache.LRUCache
 }
 
-// NewBlockManager kreira novu instancu BlockManager-a
+// Nova instanca BlockManager-a
 func NewBlockManager(blockSize int, cache *cache.LRUCache) *BlockManager {
 	return &BlockManager{
 		BlockSize: blockSize,
@@ -21,49 +21,49 @@ func NewBlockManager(blockSize int, cache *cache.LRUCache) *BlockManager {
 	}
 }
 
-// generateCacheKey kreira jedinstveni ključ za keš na osnovu fajla i indeksa bloka
+// generateCacheKey kreira jedinstveni kljuc za cache na osnovu fajla i indeksa bloka
 func (bm *BlockManager) generateCacheKey(filepath string, blockIndex int) string {
 	return fmt.Sprintf("%s_%d", filepath, blockIndex)
 }
 
-// ReadBlock učitava blok iz keša ili sa diska
+// ReadBlock ucitava blok iz cache-a ili sa diska
 func (bm *BlockManager) ReadBlock(filepath string, blockIndex int) ([]byte, error) {
 	cacheKey := bm.generateCacheKey(filepath, blockIndex)
 
-	// Provera keša
+	// Provera cache-a
 	if cachedData, found := bm.Cache.Get(cacheKey); found {
 		return cachedData, nil
 	}
 
-	// Ako nije u kešu, čitamo sa diska
+	// Ako nije u cache-u, citamo sa diska
 	file, err := os.Open(filepath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
-	// Računamo odakle počinje blok
+	// Racunamo odakle počinje blok
 	offset := int64(blockIndex * bm.BlockSize)
 	buffer := make([]byte, bm.BlockSize)
 
-	// ReadAt čita tačno od specificiranog offset-a
+	// ReadAt cita tacno od specificiranog offset-a
 	bytesRead, err := file.ReadAt(buffer, offset)
 	if err != nil && err.Error() != "EOF" {
 		return nil, err
 	}
 
-	// Uzimamo samo onoliko bajtova koliko je stvarno pročitano
+	// Uzimamo samo onoliko bajtova koliko je stvarno procitano
 	actualData := buffer[:bytesRead]
 
-	// Upisujemo u keš
+	// Upisujemo u cache
 	bm.Cache.Put(cacheKey, actualData)
 
 	return actualData, nil
 }
 
-// WriteBlock piše blok na disk i ažurira keš
+// WriteBlock piše blok na disk i azurira cache
 func (bm *BlockManager) WriteBlock(filepath string, blockIndex int, data []byte) error {
-	// Otvaramo fajl za pisanje, ako ne postoji kreiramo ga (os.O_CREATE)
+	// Otvaramo fajl za pisanje, ako ne postoji kreiramo ga
 	file, err := os.OpenFile(filepath, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return err
@@ -78,7 +78,7 @@ func (bm *BlockManager) WriteBlock(filepath string, blockIndex int, data []byte)
 		return err
 	}
 
-	// Ažuriranje keša
+	// Azuriranje cache-a
 	cacheKey := bm.generateCacheKey(filepath, blockIndex)
 	bm.Cache.Put(cacheKey, data)
 

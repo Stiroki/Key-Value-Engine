@@ -1,7 +1,8 @@
 {
-  "memtable_capacity": 10,
-  "memtable_type": "skiplist",
-  "wal_segment_size": 4096,
-  "summary_sparsity": 5,
-  "cache_size": 100
+    "memtable_capacity": 5,
+    "memtable_type": "hashmap",
+    "wal_segment_size": 1048576,
+    "summary_sparsity": 3,
+    "cache_size": 10,
+    "block_size": 4096
 }

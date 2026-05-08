@@ -1,68 +1,98 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
-	"log"
-	"time"
-
-	"github.com/Stiroki/Key-Value-Engine/config"
-	"github.com/Stiroki/Key-Value-Engine/memtable"
-	"github.com/Stiroki/Key-Value-Engine/model"
-	"github.com/Stiroki/Key-Value-Engine/wal"
+	"os"
+	"strconv"
+	"strings"
 )
 
 func main() {
-	// 1. Učitavanje konfiguracije
-	cfg, err := config.LoadConfig("config/config.json")
+	fmt.Println("==================================================")
+	fmt.Println("        POKRETANJE KEY-VALUE ENGINE-a...          ")
+	fmt.Println("==================================================")
+
+	engine, err := NewKVEngine("data", "config/config.json")
 	if err != nil {
-		log.Fatalf("Greska pri ucitavanju konfiguracije: %v", err)
+		fmt.Printf("[KRITIČNA GREŠKA] Sistem ne može da se pokrene: %v\n", err)
+		return
 	}
+	fmt.Println("[USPEH] Sistem uspešno inicijalizovan i spreman za rad!")
 
-	// 2. Inicijalizacija WAL-a
-	myWal, err := wal.NewWAL("data/wal", cfg.WalSegmentSize)
-	if err != nil {
-		log.Fatalf("Greska pri kreiranju WAL-a: %v", err)
-	}
+	scanner := bufio.NewScanner(os.Stdin)
 
-	// 3. Inicijalizacija Memtable-a
-	// Prosleđujemo kapacitet iz configa, tip strukture i naš WAL
-	mt := memtable.NewMemtable(cfg.MemtableCapacity, cfg.MemtableType, myWal)
+	for {
+		fmt.Println("\n---------------- GLAVNI MENI ----------------")
+		fmt.Println("1. Dodaj novi podatak (PUT)")
+		fmt.Println("2. Pronađi podatak (GET)")
+		fmt.Println("3. Obriši podatak (DELETE)")
+		fmt.Println("4. Validacija SSTabele (Merkle Tree)")
+		fmt.Println("5. Izlaz")
+		fmt.Print("\nIzaberite opciju (1-5): ")
 
-	fmt.Printf("Kapacitet memtable-a je %d. Krećemo sa upisom...\n", cfg.MemtableCapacity)
-	fmt.Println("--------------------------------------------------")
+		scanner.Scan()
+		opcija := strings.TrimSpace(scanner.Text())
 
-	// 4. Namerno ubacujemo VIŠE zapisa nego što može da stane (npr. 12 zapisa)
-	// Ako je u config.json capacity 10, na 10. zapisu mora da se desi Flush!
-	for i := 1; i <= 12; i++ {
-		key := fmt.Sprintf("kljuc_%d", i)
-		val := []byte(fmt.Sprintf("Vrednost za kljuc %d", i))
+		switch opcija {
+		case "1":
+			fmt.Print("Unesite ključ (Key): ")
+			scanner.Scan()
+			kljuc := strings.TrimSpace(scanner.Text())
 
-		record := &model.Record{
-			Key:       key,
-			Value:     val,
-			Tombstone: false,
-			Timestamp: time.Now(),
+			fmt.Print("Unesite vrednost (Value): ")
+			scanner.Scan()
+			vrednost := []byte(strings.TrimSpace(scanner.Text()))
+
+			err := engine.Put(kljuc, vrednost)
+			if err != nil {
+				fmt.Printf("[GREŠKA] Upis nije uspeo: %v\n", err)
+			} else {
+				fmt.Println("[USPEH] Podatak uspesno dodat!")
+			}
+
+		case "2":
+			fmt.Print("Unesite ključ za pretragu: ")
+			scanner.Scan()
+			kljuc := strings.TrimSpace(scanner.Text())
+
+			vrednost, pronadjen := engine.Get(kljuc)
+			if pronadjen {
+				fmt.Printf("[REZULTAT] Pronađeno: %s -> %s\n", kljuc, string(vrednost))
+			} else {
+				fmt.Println("[REZULTAT] Podatak ne postoji u bazi ili je obrisan.")
+			}
+
+		case "3":
+			fmt.Print("Unesite ključ koji želite da obrišete: ")
+			scanner.Scan()
+			kljuc := strings.TrimSpace(scanner.Text())
+
+			err := engine.Delete(kljuc)
+			if err != nil {
+				fmt.Printf("[GREŠKA] Brisanje nije uspelo: %v\n", err)
+			} else {
+				fmt.Println("[USPEH] Podatak uspesno (logicki) obrisan!")
+			}
+
+		case "4":
+			fmt.Print("Unesite redni broj SSTabele za validaciju (npr. 1): ")
+			scanner.Scan()
+			unos := strings.TrimSpace(scanner.Text())
+			brojTabele, err := strconv.Atoi(unos)
+			if err != nil {
+				fmt.Println("[GREŠKA] Morate uneti validan broj!")
+				continue
+			}
+
+			engine.ValidateSSTable(brojTabele)
+
+		case "5":
+			fmt.Println("Gašenje sistema... Prijatan dan!")
+			return
+
+		default:
+			fmt.Println("[GREŠKA] Nepostojeća opcija. Molimo pokušajte ponovo.")
 		}
-
-		err := mt.Put(record)
-		if err != nil {
-			log.Fatalf("Greska pri upisu: %v", err)
-		}
-		fmt.Printf("Upisan '%s'. Trenutna veličina Memtable-a: %d\n", key, mt.Data.Size())
-
-		// Mala pauza da bi fajlovi dobili jedinstvena imena po vremenu
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	fmt.Println("--------------------------------------------------")
-
-	// 5. Pokušaj čitanja ključa 5
-	fmt.Println("Pokušavam da pročitam 'kljuc_5' iz Memtable-a...")
-	rec, found := mt.Get("kljuc_5")
-	if found {
-		fmt.Printf("Pronadjen: %s -> %s\n", rec.Key, string(rec.Value))
-	} else {
-		fmt.Println("Kljuc 5 NIJE PRONADJEN u memoriji!")
-		fmt.Println("(Ovo je ispravno! Svi podaci od 1 do 10 su prebačeni na disk tokom Flusha, a memorija je ispražnjena. Trenutno su u memoriji samo ključevi 11 i 12.)")
 	}
 }

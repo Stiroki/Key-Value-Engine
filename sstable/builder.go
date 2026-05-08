@@ -2,11 +2,11 @@ package sstable
 
 import (
 	"encoding/binary"
-	"os"
+
+	"github.com/Stiroki/Key-Value-Engine/block"
 )
 
-// Record predstavlja jedan podatak koji nam prosleđuje Memtable
-// (Ovo je ista ona struktura o kojoj si se dogovorila sa Osobom A)
+// Record predstavlja jedan podatak koji nam prosledjuje Memtable
 type Record struct {
 	Key       string
 	Value     []byte
@@ -14,216 +14,212 @@ type Record struct {
 	Timestamp int64
 }
 
-// SSTableBuilder upravlja procesom kreiranja nove SSTabele
-type SSTableBuilder struct {
-	BasePath      string // Putanja i osnovno ime tabele (npr. "data/usertable-1")
-	SummaryDegree int    // Stepen proređenosti (Zahtev za ocenu 7)
-
-	// Fajlovi u koje upisujemo
-	dataFile    *os.File
-	indexFile   *os.File
-	summaryFile *os.File
-
-	// Pomoćne strukture iz prethodnih koraka
-	bloomFilter *BloomFilter
-	merkleVals  [][]byte // Ovde skupljamo sve vrednosti za Merkle stablo
-
-	// Praćenje trenutnih pozicija (offseta) u fajlovima
-	currentDataOffset  int64
-	currentIndexOffset int64
-	indexEntryCount    int
+// BMWriter sakuplja podatke u buffer i upisuje ih na disk koristeci Block Manager, buffer je velicine block-a
+type BMWriter struct {
+	filepath   string
+	bm         *block.BlockManager
+	buffer     []byte
+	blockIndex int
+	Offset     int64
 }
 
-// NewSSTableBuilder inicijalizuje sve potrebne fajlove i strukture
-func NewSSTableBuilder(basePath string, summaryDegree int, expectedElements int, falsePositiveRate float64) (*SSTableBuilder, error) {
-	// Otvaramo fajlove za Data, Index i Summary
-	dataFile, err := os.Create(basePath + "-Data.db")
-	if err != nil {
-		return nil, err
+func NewBMWriter(filepath string, bm *block.BlockManager) *BMWriter {
+	return &BMWriter{
+		filepath: filepath,
+		bm:       bm,
+		buffer:   make([]byte, 0, bm.BlockSize),
+		Offset:   0,
 	}
-
-	indexFile, err := os.Create(basePath + "-Index.db")
-	if err != nil {
-		return nil, err
-	}
-
-	summaryFile, err := os.Create(basePath + "-Summary.db")
-	if err != nil {
-		return nil, err
-	}
-
-	return &SSTableBuilder{
-		BasePath:      basePath,
-		SummaryDegree: summaryDegree,
-		dataFile:      dataFile,
-		indexFile:     indexFile,
-		summaryFile:   summaryFile,
-		bloomFilter:   NewBloomFilter(expectedElements, falsePositiveRate),
-		merkleVals:    make([][]byte, 0),
-	}, nil
 }
 
-// WriteRecord se poziva za svaki zapis iz Memtable-a (koji moraju biti sortirani!)
-func (b *SSTableBuilder) WriteRecord(rec *Record) error {
-	keyBytes := []byte(rec.Key)
+func (w *BMWriter) Write(p []byte) (n int, err error) {
+	written := 0
+	for len(p) > 0 {
+		spaceInBuf := w.bm.BlockSize - len(w.buffer)
 
-	// 1. Dodajemo ključ u Bloom Filter
-	b.bloomFilter.Add(keyBytes)
+		if spaceInBuf == 0 {
+			// Saljemo ceo blok na disk
+			err = w.bm.WriteBlock(w.filepath, w.blockIndex, w.buffer)
+			if err != nil {
+				return written, err
+			}
+			w.blockIndex++
+			w.buffer = w.buffer[:0] // Praznimo buffer za sledeci blok
+			spaceInBuf = w.bm.BlockSize
+		}
 
-	// 2. Dodajemo vrednost u listu za Merkle stablo (samo ako nije Tombstone/brisanje)
-	if !rec.Tombstone {
-		b.merkleVals = append(b.merkleVals, rec.Value)
+		toCopy := len(p)
+		if toCopy > spaceInBuf {
+			toCopy = spaceInBuf
+		}
+
+		w.buffer = append(w.buffer, p[:toCopy]...)
+		p = p[toCopy:]
+		written += toCopy
+		w.Offset += int64(toCopy)
 	}
+	return written, nil
+}
 
-	// 3. Upisujemo zapis u DATA fajl
-	// Format u Data fajlu: [Dužina ključa(uint64)] [Dužina vrednosti(uint64)] [Ključ] [Vrednost] [Tombstone(bool)] [Timestamp(int64)]
-	dataWritten, err := b.writeDataEntry(rec)
-	if err != nil {
-		return err
-	}
-
-	// 4. Upisujemo poziciju ovog zapisa u INDEX fajl
-	// Format u Index fajlu: [Dužina ključa(uint64)] [Ključ] [Offset u Data fajlu(int64)]
-	indexWritten, err := b.writeIndexEntry(keyBytes, b.currentDataOffset)
-	if err != nil {
-		return err
-	}
-
-	// 5. Proređeni SUMMARY fajl (Zahtev za ocenu 7)
-	// Ako je ovo prvi zapis ili je deljiv sa stepenom proređenosti, upiši ga u Summary
-	if b.indexEntryCount%b.SummaryDegree == 0 {
-		// Format u Summary fajlu: [Dužina ključa(uint64)] [Ključ] [Offset u Index fajlu(int64)]
-		err := b.writeSummaryEntry(keyBytes, b.currentIndexOffset)
+// Flush se poziva na kraju kako bi se upisali preostali podaci koji nisu uspeli da napune ceo blok
+func (w *BMWriter) Flush() error {
+	if len(w.buffer) > 0 {
+		err := w.bm.WriteBlock(w.filepath, w.blockIndex, w.buffer)
 		if err != nil {
 			return err
 		}
+		w.buffer = w.buffer[:0]
+	}
+	return nil
+}
+
+type SSTableBuilder struct {
+	BasePath      string
+	SummaryDegree int
+	BM            *block.BlockManager
+
+	dataFile    *BMWriter
+	indexFile   *BMWriter
+	summaryFile *BMWriter
+
+	bloomFilter *BloomFilter
+	merkleVals  [][]byte // Skupljamo vrednosti za Merkle stablo
+
+	indexEntryCount int
+}
+
+func NewSSTableBuilder(basePath string, summaryDegree int, expectedElements int, falsePositiveRate float64, bm *block.BlockManager) (*SSTableBuilder, error) {
+	return &SSTableBuilder{
+		BasePath:      basePath,
+		SummaryDegree: summaryDegree,
+		BM:            bm,
+
+		dataFile:    NewBMWriter(basePath+"-Data.db", bm),
+		indexFile:   NewBMWriter(basePath+"-Index.db", bm),
+		summaryFile: NewBMWriter(basePath+"-Summary.db", bm),
+
+		bloomFilter: NewBloomFilter(expectedElements, falsePositiveRate),
+		merkleVals:  make([][]byte, 0),
+	}, nil
+}
+
+func (b *SSTableBuilder) WriteRecord(rec *Record) error {
+	dataOffset := b.dataFile.Offset
+
+	b.bloomFilter.Add([]byte(rec.Key))
+
+	// Cuva vrednost za Merkle stablo
+	if !rec.Tombstone && rec.Value != nil {
+		b.merkleVals = append(b.merkleVals, rec.Value)
 	}
 
-	// Ažuriramo brojace
-	b.currentDataOffset += dataWritten
-	b.currentIndexOffset += indexWritten
+	if err := b.writeDataRecord(rec); err != nil {
+		return err
+	}
+
+	indexOffset := b.indexFile.Offset
+	if err := b.writeIndexEntry([]byte(rec.Key), dataOffset); err != nil {
+		return err
+	}
+
+	if b.indexEntryCount%b.SummaryDegree == 0 {
+		if err := b.writeSummaryEntry([]byte(rec.Key), indexOffset); err != nil {
+			return err
+		}
+	}
 	b.indexEntryCount++
 
 	return nil
 }
 
-// Finish zatvara fajlove i kreira Meta i Filter strukture na disku
-func (b *SSTableBuilder) Finish() error {
-	// Zatvaramo osnovne fajlove
-	b.dataFile.Close()
-	b.indexFile.Close()
-	b.summaryFile.Close()
-
-	// Serijalizujemo i snimamo Bloom Filter
-	filterFile, _ := os.Create(b.BasePath + "-Filter.db")
-	defer filterFile.Close()
-	// Uprošćeno snimanje filtera (zapišemo M, K i BitSet)
-	binary.Write(filterFile, binary.LittleEndian, uint64(b.bloomFilter.M))
-	binary.Write(filterFile, binary.LittleEndian, uint64(b.bloomFilter.K))
-	filterFile.Write(b.bloomFilter.BitSet)
-
-	// Generišemo Merkle stablo od svih prikupljenih vrednosti
-	merkleTree := NewMerkleTree(b.merkleVals)
-
-	// Serijalizujemo Root heš Merkle stabla u Metadata fajl
-	metaFile, _ := os.Create(b.BasePath + "-Metadata.db")
-	defer metaFile.Close()
-	if merkleTree.Root != nil {
-		metaFile.Write(merkleTree.Root.Hash)
-	}
-
-	return nil
-}
-
-// writeDataEntry upisuje jedan zapis u Data fajl i vraća broj upisanih bajtova
-func (b *SSTableBuilder) writeDataEntry(rec *Record) (int64, error) {
-	var written int64 = 0
+func (b *SSTableBuilder) writeDataRecord(rec *Record) error {
 	keyBytes := []byte(rec.Key)
 	keyLen := uint64(len(keyBytes))
 	valLen := uint64(len(rec.Value))
 
-	// 1. Upisujemo dužinu ključa (8 bajtova za uint64)
 	if err := binary.Write(b.dataFile, binary.LittleEndian, keyLen); err != nil {
-		return 0, err
+		return err
 	}
-	written += 8
-
-	// 2. Upisujemo dužinu vrednosti (8 bajtova za uint64)
 	if err := binary.Write(b.dataFile, binary.LittleEndian, valLen); err != nil {
-		return 0, err
+		return err
 	}
-	written += 8
-
-	// 3. Upisujemo sam ključ
-	n, err := b.dataFile.Write(keyBytes)
-	if err != nil {
-		return 0, err
+	if _, err := b.dataFile.Write(keyBytes); err != nil {
+		return err
 	}
-	written += int64(n)
 
-	// 4. Upisujemo samu vrednost
-	n, err = b.dataFile.Write(rec.Value)
-	if err != nil {
-		return 0, err
+	if valLen > 0 {
+		if _, err := b.dataFile.Write(rec.Value); err != nil {
+			return err
+		}
 	}
-	written += int64(n)
-
-	// 5. Upisujemo Tombstone marker (paket binary ispisuje bool kao 1 bajt: 0 ili 1)
 	if err := binary.Write(b.dataFile, binary.LittleEndian, rec.Tombstone); err != nil {
-		return 0, err
+		return err
 	}
-	written += 1
-
-	// 6. Upisujemo Timestamp (8 bajtova za int64)
 	if err := binary.Write(b.dataFile, binary.LittleEndian, rec.Timestamp); err != nil {
-		return 0, err
+		return err
 	}
-	written += 8
-
-	return written, nil
+	return nil
 }
 
-// writeIndexEntry upisuje ključ i njegovu poziciju (offset) u Data fajlu
-func (b *SSTableBuilder) writeIndexEntry(key []byte, dataOffset int64) (int64, error) {
-	var written int64 = 0
+func (b *SSTableBuilder) writeIndexEntry(key []byte, dataOffset int64) error {
 	keyLen := uint64(len(key))
-
-	// 1. Dužina ključa
 	if err := binary.Write(b.indexFile, binary.LittleEndian, keyLen); err != nil {
-		return 0, err
+		return err
 	}
-	written += 8
-
-	// 2. Sam ključ
-	n, err := b.indexFile.Write(key)
-	if err != nil {
-		return 0, err
+	if _, err := b.indexFile.Write(key); err != nil {
+		return err
 	}
-	written += int64(n)
-
-	// 3. Offset u Data fajlu (8 bajtova za int64)
 	if err := binary.Write(b.indexFile, binary.LittleEndian, dataOffset); err != nil {
-		return 0, err
+		return err
 	}
-	written += 8
-
-	return written, nil
+	return nil
 }
 
-// writeSummaryEntry upisuje ključ i njegovu poziciju (offset) u Index fajlu
 func (b *SSTableBuilder) writeSummaryEntry(key []byte, indexOffset int64) error {
 	keyLen := uint64(len(key))
-
-	// 1. Dužina ključa
 	if err := binary.Write(b.summaryFile, binary.LittleEndian, keyLen); err != nil {
 		return err
 	}
-
-	// 2. Sam ključ
 	if _, err := b.summaryFile.Write(key); err != nil {
 		return err
 	}
+	if err := binary.Write(b.summaryFile, binary.LittleEndian, indexOffset); err != nil {
+		return err
+	}
+	return nil
+}
 
-	// 3. Offset u Index fajlu (8 bajtova za int64)
-	return binary.Write(b.summaryFile, binary.LittleEndian, indexOffset)
+// Finish osigurava da su svi nezavrseni blokovi izbaceni na disk i generise Bloom filter
+func (b *SSTableBuilder) Finish() error {
+	if err := b.dataFile.Flush(); err != nil {
+		return err
+	}
+	if err := b.indexFile.Flush(); err != nil {
+		return err
+	}
+	if err := b.summaryFile.Flush(); err != nil {
+		return err
+	}
+
+	bloomWriter := NewBMWriter(b.BasePath+"-Filter.db", b.BM)
+
+	m := uint64(b.bloomFilter.M)
+	k := uint64(b.bloomFilter.K)
+
+	if err := binary.Write(bloomWriter, binary.LittleEndian, m); err != nil {
+		return err
+	}
+	if err := binary.Write(bloomWriter, binary.LittleEndian, k); err != nil {
+		return err
+	}
+	if _, err := bloomWriter.Write(b.bloomFilter.BitSet); err != nil {
+		return err
+	}
+
+	// Flush i za Bloom filter
+	if err := bloomWriter.Flush(); err != nil {
+		return err
+	}
+
+	return nil
 }
