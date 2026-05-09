@@ -22,7 +22,7 @@ func NewBMReader(filepath string, bm *block.BlockManager) *BMReader {
 	}
 }
 
-// Read implementira io.Reader koristeći BlockManager
+// Read implementira io.Reader koristeci BlockManager
 func (r *BMReader) Read(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		return 0, nil

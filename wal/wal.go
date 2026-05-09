@@ -3,9 +3,11 @@ package wal
 import (
 	"encoding/binary"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Stiroki/Key-Value-Engine/model"
@@ -56,8 +58,8 @@ func (w *WAL) Put(record *model.Record) error {
 	keySize := uint64(len(keyBytes))
 	valSize := uint64(len(record.Value))
 
-	// 8 (timestamp) + 1 (tombstone) + 8 (keySize) + 8 (valSize) + duzina kljuca + duzina vrednosti
-	totalSize := int64(8 + 1 + 8 + 8 + keySize + valSize)
+	// 4 (crc32) + 8 (timestamp) + 1 (tombstone) + 8 (keySize) + 8 (valSize) + duzina kljuca + duzina vrednosti
+	totalSize := int64(4 + 8 + 1 + 8 + 8 + keySize + valSize)
 
 	// Proveravamo da li treba da otvorimo novi segment
 	if w.CurrentFile == nil || w.CurrentSize+totalSize > w.SegmentSize {
@@ -69,7 +71,7 @@ func (w *WAL) Put(record *model.Record) error {
 
 	// Alociramo memorijski buffer u koji pakujemo sve podatke
 	buf := make([]byte, totalSize)
-	offset := 0
+	offset := 4
 
 	binary.LittleEndian.PutUint64(buf[offset:], uint64(record.Timestamp.UnixNano()))
 	offset += 8
@@ -91,6 +93,10 @@ func (w *WAL) Put(record *model.Record) error {
 	offset += int(keySize)
 
 	copy(buf[offset:], record.Value)
+
+	// Izracunavamo CRC32 checksum
+	crc := crc32.ChecksumIEEE(buf[4:])
+	binary.LittleEndian.PutUint32(buf[0:4], crc)
 
 	_, err := w.CurrentFile.Write(buf)
 	if err != nil {
@@ -115,6 +121,10 @@ func (w *WAL) ReadAll(directory string) ([]model.Record, error) {
 			continue
 		}
 
+		if !strings.HasSuffix(fileInfo.Name(), ".log") {
+			continue
+		}
+
 		filePath := filepath.Join(directory, fileInfo.Name())
 		file, err := os.Open(filePath)
 		if err != nil {
@@ -122,8 +132,8 @@ func (w *WAL) ReadAll(directory string) ([]model.Record, error) {
 		}
 
 		for {
-			// 8 (timestamp) + 1 (tombstone) + 8 (keySize) + 8 (valSize) = 25
-			header := make([]byte, 25)
+			// 4 (crc32) + 8 (timestamp) + 1 (tombstone) + 8 (keySize) + 8 (valSize) = 29
+			header := make([]byte, 29)
 			_, err := io.ReadFull(file, header)
 			if err == io.EOF {
 				break
@@ -131,12 +141,12 @@ func (w *WAL) ReadAll(directory string) ([]model.Record, error) {
 				file.Close()
 				return nil, fmt.Errorf("greska pri citanju zaglavlja iz %s: %v", fileInfo.Name(), err)
 			}
-
+			savedCRC := binary.LittleEndian.Uint32(header[0:4])
 			// Parsiramo zaglavlje
-			timestampNano := binary.LittleEndian.Uint64(header[0:8])
-			tombstone := header[8] == 1
-			keySize := binary.LittleEndian.Uint64(header[9:17])
-			valSize := binary.LittleEndian.Uint64(header[17:25])
+			timestampNano := binary.LittleEndian.Uint64(header[4:12])
+			tombstone := header[12] == 1
+			keySize := binary.LittleEndian.Uint64(header[13:21])
+			valSize := binary.LittleEndian.Uint64(header[21:29])
 
 			// Citamo kljuc na osnovu procitane velicine
 			keyBytes := make([]byte, keySize)
@@ -152,6 +162,15 @@ func (w *WAL) ReadAll(directory string) ([]model.Record, error) {
 			if err != nil {
 				file.Close()
 				return nil, err
+			}
+
+			dataForCRC := append(header[4:], keyBytes...)
+			dataForCRC = append(dataForCRC, valBytes...)
+			calculatedCRC := crc32.ChecksumIEEE(dataForCRC)
+
+			if savedCRC != calculatedCRC {
+				file.Close()
+				return nil, fmt.Errorf("greska pri citanju WAL fajla %s: CRC mismatch (ocekivano %08x, izracunato %08x)", fileInfo.Name(), savedCRC, calculatedCRC)
 			}
 
 			// Pakujemo sve nazad u Record strukturu

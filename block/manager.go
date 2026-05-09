@@ -7,7 +7,6 @@ import (
 	"github.com/Stiroki/Key-Value-Engine/cache"
 )
 
-// Blockmanager je centralna komponenta koja upravlja citanjem i pisanjem blokova na disk
 type BlockManager struct {
 	BlockSize int
 	Cache     *cache.LRUCache
@@ -61,7 +60,7 @@ func (bm *BlockManager) ReadBlock(filepath string, blockIndex int) ([]byte, erro
 	return actualData, nil
 }
 
-// WriteBlock piše blok na disk i azurira cache
+// WriteBlock pize blok na disk i azurira cache
 func (bm *BlockManager) WriteBlock(filepath string, blockIndex int, data []byte) error {
 	// Otvaramo fajl za pisanje, ako ne postoji kreiramo ga
 	file, err := os.OpenFile(filepath, os.O_RDWR|os.O_CREATE, 0666)

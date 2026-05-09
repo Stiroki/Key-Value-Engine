@@ -25,7 +25,7 @@ func NewMemtable(capacity int, structType string, wal *wal.WAL) *Memtable {
 	case "skiplist":
 		data = NewSkipList()
 	case "btree":
-		data = NewHashMap()
+		data = NewBTree(3)
 	default:
 		data = NewHashMap()
 	}

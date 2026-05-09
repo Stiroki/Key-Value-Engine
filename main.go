@@ -88,7 +88,7 @@ func main() {
 			engine.ValidateSSTable(brojTabele)
 
 		case "5":
-			fmt.Println("Gašenje sistema... Prijatan dan!")
+			fmt.Println("Gašenje sistema...")
 			return
 
 		default:

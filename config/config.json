@@ -1,6 +1,6 @@
 {
     "memtable_capacity": 5,
-    "memtable_type": "hashmap",
+    "memtable_type": "btree",
     "wal_segment_size": 1048576,
     "summary_sparsity": 3,
     "cache_size": 10,
