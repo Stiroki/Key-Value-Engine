@@ -17,13 +17,20 @@ type Config struct {
 
 // LoadConfig cita JSON fajl i vraca Config objekat
 func LoadConfig(filename string) (*Config, error) {
+	config := Config{
+		MemtableCapacity: 5,
+		MemtableType:     "btree",
+		WalSegmentSize:   1048576,
+		SummarySparsity:  3,
+		CacheSize:        10,
+		BlockSize:        4096,
+	}
+
 	file, err := os.Open(filename)
 	if err != nil {
-		return nil, err
+		return &config, nil
 	}
 	defer file.Close()
-
-	var config Config
 
 	// Dekodiramo JSON
 	decoder := json.NewDecoder(file)
