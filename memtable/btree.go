@@ -114,15 +114,17 @@ func (t *BTree) insertNonFull(node *BTreeNode, record *model.Record) {
 		for i >= 0 && strings.Compare(record.Key, node.Records[i].Key) < 0 {
 			i--
 		}
+
+		if i >= 0 && node.Records[i].Key == record.Key {
+			node.Records[i] = record
+			return
+		}
 		i++
 
 		if len(node.Children[i].Records) == t.M-1 {
 			t.splitChild(node, i, node.Children[i])
 			if strings.Compare(record.Key, node.Records[i].Key) > 0 {
 				i++
-			} else if record.Key == node.Records[i].Key {
-				node.Records[i] = record
-				return
 			}
 		}
 		t.insertNonFull(node.Children[i], record)
