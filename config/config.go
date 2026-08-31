@@ -15,6 +15,7 @@ type Config struct {
 	BlockSize           int    `json:"block_size"`
 	TokenBucketCapacity int    `json:"token_bucket_capacity"`
 	TokenBucketRefillMs int64  `json:"token_bucket_refill_ms"`
+	MemtableInstances   int    `json:"memtable_instances"`
 }
 
 // LoadConfig cita JSON fajl i vraca Config objekat
@@ -28,6 +29,7 @@ func LoadConfig(filename string) (*Config, error) {
 		BlockSize:           4096,
 		TokenBucketCapacity: 10,
 		TokenBucketRefillMs: 1000,
+		MemtableInstances:   3,
 	}
 
 	file, err := os.Open(filename)

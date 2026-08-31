@@ -24,7 +24,7 @@ const tokenBucketKey = "__internal_token_bucket__"
 
 // KVEngine je centralna struktura koja povezuje sve komponente sistema
 type KVEngine struct {
-	Memtable     *memtable.Memtable
+	MemtablePool *memtable.MemtablePool
 	Wal          *wal.WAL
 	Cache        *cache.LRUCache
 	Config       *config.Config
@@ -69,13 +69,13 @@ func NewKVEngine(dataDir string, configPath string) (*KVEngine, error) {
 	}
 
 	// Inicijalizacija Memtable-a
-	mt := memtable.NewMemtable(cfg.MemtableCapacity, cfg.MemtableType, w)
+	pool := memtable.NewMemtablePool(cfg.MemtableInstances, cfg.MemtableCapacity, cfg.MemtableType, w)
 
 	// Recovery iz WAL-a
 	recoveredRecords, err := w.ReadAll(dataDir)
 	if err == nil {
 		for i := range recoveredRecords {
-			mt.Put(&recoveredRecords[i])
+			pool.PutDirect(&recoveredRecords[i])
 		}
 	} else {
 		fmt.Printf("[UPOZORENJE] Greška pri citanju WAL-a: %v\n", err)
@@ -88,7 +88,7 @@ func NewKVEngine(dataDir string, configPath string) (*KVEngine, error) {
 
 	// KREIRANJE ENGINE OBJEKTA
 	engine := &KVEngine{
-		Memtable:     mt,
+		MemtablePool: pool,
 		Wal:          w,
 		Cache:        c,
 		Config:       cfg,
@@ -98,12 +98,12 @@ func NewKVEngine(dataDir string, configPath string) (*KVEngine, error) {
 	}
 
 	// Povezujemo flush callback Memtable-a sa funkcijom za kreiranje SSTable-a u Engine-u
-	engine.Memtable.FlushCallback = engine.BuildSSTable
+	engine.MemtablePool.FlushCallback = engine.BuildSSTable
 
 	refillInterval := time.Duration(cfg.TokenBucketRefillMs) * time.Millisecond
 	var limiter *ratelimit.TokenBucket
 
-	if rec, found := mt.Get(tokenBucketKey); found && !rec.Tombstone {
+	if rec, found := pool.Get(tokenBucketKey); found && !rec.Tombstone {
 		limiter = ratelimit.Deserialize(rec.Value)
 	} else {
 		loaded := false
@@ -149,7 +149,7 @@ func (e *KVEngine) Put(key string, value []byte) error {
 		Timestamp: time.Now(),
 	}
 
-	return e.Memtable.Put(record)
+	return e.MemtablePool.Put(record)
 }
 
 // Get pronalazi podatak prateci Read Path (Memtable -> Cache -> SSTable)
@@ -163,7 +163,7 @@ func (e *KVEngine) Get(key string) ([]byte, bool, error) {
 	}
 
 	// Pretraga u Memtable-u
-	record, found := e.Memtable.Get(key)
+	record, found := e.MemtablePool.Get(key)
 	if found {
 		if record.Tombstone {
 			return nil, false, nil
@@ -218,7 +218,7 @@ func (e *KVEngine) Delete(key string) error {
 	// Uklanjanje iz cache-a
 	e.Cache.Remove(key)
 
-	return e.Memtable.Put(record)
+	return e.MemtablePool.Put(record)
 }
 
 func (e *KVEngine) BuildSSTable(records []*model.Record) error {
@@ -351,5 +351,5 @@ func (e *KVEngine) SaveTokenBucketState() {
 		Tombstone: false,
 		Timestamp: time.Now(),
 	}
-	e.Memtable.Data.Put(record)
+	e.MemtablePool.Tables[0].Data.Put(record)
 }

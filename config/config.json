@@ -6,5 +6,6 @@
     "cache_size": 10,
     "block_size": 4096,
     "token_bucket_capacity": 1,
-    "token_bucket_refill_ms": 10000
+    "token_bucket_refill_ms": 10000,
+    "memtable_instances":3
 }

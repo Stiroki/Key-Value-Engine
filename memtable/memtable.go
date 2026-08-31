@@ -59,9 +59,21 @@ func (mt *Memtable) Put(record *model.Record) error {
 	return nil
 }
 
+func (mt *Memtable) PutDirect(record *model.Record) {
+	mt.Data.Put(record)
+}
+
+func (mt *Memtable) IsFull() bool {
+	return mt.Data.Size() >= mt.Capacity
+}
+
 // Get trazi zapis u memoriji
 func (mt *Memtable) Get(key string) (*model.Record, bool) {
 	return mt.Data.Get(key)
+}
+
+func (mt *Memtable) GetAll() []*model.Record {
+	return mt.Data.GetAll()
 }
 
 // Flush prebacuje podatke iz memorije na disk (SSTable) i cisti memtable
