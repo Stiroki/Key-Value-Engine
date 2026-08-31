@@ -56,8 +56,10 @@ func main() {
 			scanner.Scan()
 			kljuc := strings.TrimSpace(scanner.Text())
 
-			vrednost, pronadjen := engine.Get(kljuc)
-			if pronadjen {
+			vrednost, pronadjen, greska := engine.Get(kljuc)
+			if greska != nil {
+				fmt.Printf("[GRESKA]  %v\n", greska)
+			} else if pronadjen {
 				fmt.Printf("[REZULTAT] Pronađeno: %s -> %s\n", kljuc, string(vrednost))
 			} else {
 				fmt.Println("[REZULTAT] Podatak ne postoji u bazi ili je obrisan.")
@@ -88,6 +90,7 @@ func main() {
 			engine.ValidateSSTable(brojTabele)
 
 		case "5":
+			engine.SaveTokenBucketState()
 			fmt.Println("Gašenje sistema...")
 			return
 

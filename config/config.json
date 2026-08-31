@@ -4,5 +4,7 @@
     "wal_segment_size": 1048576,
     "summary_sparsity": 3,
     "cache_size": 10,
-    "block_size": 4096
+    "block_size": 4096,
+    "token_bucket_capacity": 1,
+    "token_bucket_refill_ms": 10000
 }

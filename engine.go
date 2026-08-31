@@ -15,9 +15,12 @@ import (
 	"github.com/Stiroki/Key-Value-Engine/config"
 	"github.com/Stiroki/Key-Value-Engine/memtable"
 	"github.com/Stiroki/Key-Value-Engine/model"
+	"github.com/Stiroki/Key-Value-Engine/ratelimit"
 	"github.com/Stiroki/Key-Value-Engine/sstable"
 	"github.com/Stiroki/Key-Value-Engine/wal"
 )
+
+const tokenBucketKey = "__internal_token_bucket__"
 
 // KVEngine je centralna struktura koja povezuje sve komponente sistema
 type KVEngine struct {
@@ -28,6 +31,7 @@ type KVEngine struct {
 	BlockManager *block.BlockManager
 	DataDir      string
 	SSTableCount int
+	Limiter      *ratelimit.TokenBucket
 }
 
 // NewKVEngine inicijalizuje bazu, ucitava konfiguraciju i radi oporavak iz WAL-a
@@ -96,11 +100,48 @@ func NewKVEngine(dataDir string, configPath string) (*KVEngine, error) {
 	// Povezujemo flush callback Memtable-a sa funkcijom za kreiranje SSTable-a u Engine-u
 	engine.Memtable.FlushCallback = engine.BuildSSTable
 
+	refillInterval := time.Duration(cfg.TokenBucketRefillMs) * time.Millisecond
+	var limiter *ratelimit.TokenBucket
+
+	if rec, found := mt.Get(tokenBucketKey); found && !rec.Tombstone {
+		limiter = ratelimit.Deserialize(rec.Value)
+	} else {
+		loaded := false
+		for i := maxTableNum; i > 0; i-- {
+			tableName := fmt.Sprintf("%s/usertable-%d", dataDir, i)
+			reader, err := sstable.NewSSTableReader(tableName, bm)
+			if err != nil {
+				continue
+			}
+			rec, err := reader.Find(tokenBucketKey)
+			if err == nil && rec != nil && !rec.Tombstone {
+				limiter = ratelimit.Deserialize(rec.Value)
+				loaded = true
+				break
+			}
+		}
+		if !loaded {
+			limiter = ratelimit.NewTokenBucket(cfg.TokenBucketCapacity, refillInterval)
+		}
+	}
+
+	engine.Limiter = limiter
+
 	return engine, nil
 }
 
 // Put kreira zapis i prosledjuje ga Memtable-u
 func (e *KVEngine) Put(key string, value []byte) error {
+	if key == tokenBucketKey {
+		return fmt.Errorf("Kljuc je rezervisan za internu upotrebu.")
+	}
+
+	if !e.Limiter.Allow() {
+		return fmt.Errorf("Previse zahteva, pokusajte ponovo kasnije.")
+	}
+
+	e.Cache.Remove(key)
+
 	record := &model.Record{
 		Key:       key,
 		Value:     value,
@@ -112,19 +153,27 @@ func (e *KVEngine) Put(key string, value []byte) error {
 }
 
 // Get pronalazi podatak prateci Read Path (Memtable -> Cache -> SSTable)
-func (e *KVEngine) Get(key string) ([]byte, bool) {
+func (e *KVEngine) Get(key string) ([]byte, bool, error) {
+	if key == tokenBucketKey {
+		return nil, false, nil
+	}
+
+	if !e.Limiter.Allow() {
+		return nil, false, fmt.Errorf("Previse zahteva, pokusajte ponovo kasnije.")
+	}
+
 	// Pretraga u Memtable-u
 	record, found := e.Memtable.Get(key)
 	if found {
 		if record.Tombstone {
-			return nil, false
+			return nil, false, nil
 		}
-		return record.Value, true
+		return record.Value, true, nil
 	}
 
 	// Pretraga u cache-u
 	if cachedVal, cacheFound := e.Cache.Get(key); cacheFound {
-		return cachedVal, true
+		return cachedVal, true, nil
 	}
 
 	// Pretraga u SSTabelama (od najnovije ka najstarijoj)
@@ -138,19 +187,27 @@ func (e *KVEngine) Get(key string) ([]byte, bool) {
 		rec, err := reader.Find(key)
 		if err == nil && rec != nil {
 			if rec.Tombstone {
-				return nil, false
+				return nil, false, nil
 			}
 			// Stavljamo na vrh cache-a
 			e.Cache.Put(key, rec.Value)
-			return rec.Value, true
+			return rec.Value, true, nil
 		}
 	}
 
-	return nil, false
+	return nil, false, nil
 }
 
 // Delete logicko brisanje
 func (e *KVEngine) Delete(key string) error {
+	if key == tokenBucketKey {
+		return fmt.Errorf("Kljuc je rezervisan za internu upotrebu.")
+	}
+
+	if !e.Limiter.Allow() {
+		return fmt.Errorf("Previse zahteva, pokusajte ponovo kasnije.")
+	}
+
 	record := &model.Record{
 		Key:       key,
 		Value:     nil,
@@ -285,4 +342,14 @@ func (e *KVEngine) ValidateSSTable(tableNum int) {
 	} else {
 		fmt.Printf("\n>>> [KORUPCIJA] UPOZORENJE! Podaci u SSTabeli %d su izmenjeni ili oštećeni! <<<\n\n", tableNum)
 	}
+}
+
+func (e *KVEngine) SaveTokenBucketState() {
+	record := &model.Record{
+		Key:       tokenBucketKey,
+		Value:     e.Limiter.Serialize(),
+		Tombstone: false,
+		Timestamp: time.Now(),
+	}
+	e.Memtable.Data.Put(record)
 }
