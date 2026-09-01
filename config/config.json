@@ -2,10 +2,11 @@
     "memtable_capacity": 5,
     "memtable_type": "btree",
     "wal_segment_size": 1048576,
+    "wal_block_count": 10,
     "summary_sparsity": 3,
     "cache_size": 10,
     "block_size": 4096,
     "token_bucket_capacity": 1,
     "token_bucket_refill_ms": 10000,
-    "memtable_instances":3
+    "memtable_instances": 3
 }

@@ -10,6 +10,7 @@ type Config struct {
 	MemtableCapacity    int    `json:"memtable_capacity"`
 	MemtableType        string `json:"memtable_type"`
 	WalSegmentSize      int64  `json:"wal_segment_size"`
+	WalBlockCount       int    `json:"wal_block_count"`
 	SummarySparsity     int    `json:"summary_sparsity"`
 	CacheSize           int    `json:"cache_size"`
 	BlockSize           int    `json:"block_size"`
@@ -24,6 +25,7 @@ func LoadConfig(filename string) (*Config, error) {
 		MemtableCapacity:    5,
 		MemtableType:        "btree",
 		WalSegmentSize:      1048576,
+		WalBlockCount:       10,
 		SummarySparsity:     3,
 		CacheSize:           10,
 		BlockSize:           4096,

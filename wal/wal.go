@@ -13,23 +13,35 @@ import (
 	"github.com/Stiroki/Key-Value-Engine/model"
 )
 
+const (
+	FragFull   byte = 0
+	FragFirst  byte = 1
+	FragMiddle byte = 2
+	FragLast   byte = 3
+)
+
+const FragHeader = 7
+
 type WAL struct {
 	Directory   string
-	SegmentSize int64
+	BlockSize   int
+	BlockCount  int // broj blokova po segmentu
 	CurrentFile *os.File
-	CurrentSize int64
+	BlockIndex  int // trenutni blok unutar segmenta
+	BlockOffset int // pozicija unutar trenutnog bloka
 }
 
 // NewWAL inicijalizuje WAL, kreira folder ako ne postoji i priprema ga za rad
-func NewWAL(directory string, segmentSize int64) (*WAL, error) {
+func NewWAL(directory string, blockSize int, blockCount int) (*WAL, error) {
 	err := os.MkdirAll(directory, 0755)
 	if err != nil {
 		return nil, fmt.Errorf("greska pri kreiranju WAL foldera: %v", err)
 	}
 
 	wal := &WAL{
-		Directory:   directory,
-		SegmentSize: segmentSize,
+		Directory:  directory,
+		BlockSize:  blockSize,
+		BlockCount: blockCount,
 	}
 
 	return wal, nil
@@ -37,6 +49,7 @@ func NewWAL(directory string, segmentSize int64) (*WAL, error) {
 
 func (w *WAL) openNewSegment() error {
 	if w.CurrentFile != nil {
+		w.padCurrentBlock()
 		w.CurrentFile.Close()
 	}
 
@@ -49,29 +62,29 @@ func (w *WAL) openNewSegment() error {
 	}
 
 	w.CurrentFile = file
-	w.CurrentSize = 0
+	w.BlockIndex = 0
+	w.BlockOffset = 0
 	return nil
 }
 
-func (w *WAL) Put(record *model.Record) error {
+func (w *WAL) padCurrentBlock() {
+	remaining := w.BlockSize - w.BlockOffset
+	if remaining > 0 && remaining < w.BlockSize {
+		padding := make([]byte, remaining)
+		w.CurrentFile.Write(padding)
+	}
+	w.BlockIndex++
+	w.BlockOffset = 0
+}
+
+func serializeRecord(record *model.Record) []byte {
 	keyBytes := []byte(record.Key)
 	keySize := uint64(len(keyBytes))
 	valSize := uint64(len(record.Value))
 
-	// 4 (crc32) + 8 (timestamp) + 1 (tombstone) + 8 (keySize) + 8 (valSize) + duzina kljuca + duzina vrednosti
-	totalSize := int64(4 + 8 + 1 + 8 + 8 + keySize + valSize)
-
-	// Proveravamo da li treba da otvorimo novi segment
-	if w.CurrentFile == nil || w.CurrentSize+totalSize > w.SegmentSize {
-		err := w.openNewSegment()
-		if err != nil {
-			return fmt.Errorf("greska pri otvaranju novog WAL segmenta: %v", err)
-		}
-	}
-
-	// Alociramo memorijski buffer u koji pakujemo sve podatke
+	totalSize := 8 + 1 + 8 + 8 + keySize + valSize
 	buf := make([]byte, totalSize)
-	offset := 4
+	offset := 0
 
 	binary.LittleEndian.PutUint64(buf[offset:], uint64(record.Timestamp.UnixNano()))
 	offset += 8
@@ -94,16 +107,133 @@ func (w *WAL) Put(record *model.Record) error {
 
 	copy(buf[offset:], record.Value)
 
-	// Izracunavamo CRC32 checksum
-	crc := crc32.ChecksumIEEE(buf[4:])
-	binary.LittleEndian.PutUint32(buf[0:4], crc)
+	return buf
+}
 
-	_, err := w.CurrentFile.Write(buf)
+func deserializeRecord(data []byte) model.Record {
+	offset := 0
+
+	timestampNano := binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+
+	tombstone := data[offset] == 1
+	offset += 1
+
+	keySize := binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+
+	valSize := binary.LittleEndian.Uint64(data[offset:])
+	offset += 8
+
+	keyBytes := make([]byte, keySize)
+	copy(keyBytes, data[offset:offset+int(keySize)])
+	offset += int(keySize)
+
+	valBytes := make([]byte, valSize)
+	copy(valBytes, data[offset:offset+int(valSize)])
+
+	return model.Record{
+		Key:       string(keyBytes),
+		Value:     valBytes,
+		Tombstone: tombstone,
+		Timestamp: time.Unix(0, int64(timestampNano)),
+	}
+}
+
+func (w *WAL) writeFragment(fragType byte, data []byte) error {
+	header := make([]byte, FragHeader)
+	header[0] = fragType
+	crc := crc32.ChecksumIEEE(data)
+	binary.LittleEndian.PutUint32(header[1:5], crc)
+	binary.LittleEndian.PutUint16(header[5:7], uint16(len(data)))
+
+	_, err := w.CurrentFile.Write(header)
 	if err != nil {
-		return fmt.Errorf("greska pri upisu u WAL fajl: %v", err)
+		return fmt.Errorf("Greska pri upisu zaglavlja fragmenta: %v", err)
 	}
 
-	w.CurrentSize += totalSize
+	_, err = w.CurrentFile.Write(data)
+	if err != nil {
+		return fmt.Errorf("Greska pri upisu podataka fragmenta: %v", err)
+	}
+
+	w.BlockOffset += FragHeader + len(data)
+	return nil
+}
+
+func (w *WAL) Put(record *model.Record) error {
+	data := serializeRecord(record)
+
+	// Proveravamo da li treba da otvorimo novi segment
+	if w.CurrentFile == nil {
+		err := w.openNewSegment()
+		if err != nil {
+			return fmt.Errorf("greska pri otvaranju novog WAL segmenta: %v", err)
+		}
+	}
+
+	dataOffset := 0 // Koliko smo vec upisali
+	first := true   // Da li je ovo prvi fragment zapisa
+
+	for dataOffset < len(data) {
+		remaining := w.BlockSize - w.BlockOffset
+
+		// Ako nema mesta, padding pa novi blok
+		if remaining < FragHeader {
+			w.padCurrentBlock()
+
+			if w.BlockIndex >= w.BlockCount {
+				err := w.openNewSegment()
+				if err != nil {
+					return fmt.Errorf("Greska pri otvaranju novog segmenta: %v", err)
+				}
+			}
+			remaining = w.BlockSize - w.BlockOffset
+		}
+		// Koliko podataka moze da stane u ovaj blok bez zaglavlja
+		spaceForData := remaining - FragHeader
+		leftToWrite := len(data) - dataOffset
+		// Ako sve staje u blok
+		if leftToWrite <= spaceForData {
+			var fragType byte
+			if first {
+				fragType = FragFull // Ceo zapis u jednom fragmentu
+			} else {
+				fragType = FragLast // Poslednji deo zapisa
+			}
+
+			err := w.writeFragment(fragType, data[dataOffset:dataOffset+leftToWrite])
+			if err != nil {
+				return fmt.Errorf("Greska pri upisu FULL/LAST fragmenta: %v", err)
+			}
+
+			dataOffset += leftToWrite
+			// Ukoliko ne staje sve u jedan blok
+		} else {
+			var fragType byte
+			if first {
+				fragType = FragFirst // Prvi deo zapisa
+			} else {
+				fragType = FragMiddle // Srednji deo zapisa
+			}
+
+			err := w.writeFragment(fragType, data[dataOffset:dataOffset+spaceForData])
+			if err != nil {
+				return fmt.Errorf("Greska pri upisu FIRST/MIDDLE fragmenta: %v", err)
+			}
+			dataOffset += spaceForData
+			first = false
+
+			w.padCurrentBlock()
+
+			if w.BlockIndex >= w.BlockCount {
+				err := w.openNewSegment()
+				if err != nil {
+					return fmt.Errorf("Greska pri otvaranju novog segmenta: %v", err)
+				}
+			}
+		}
+	}
 
 	return nil
 }
@@ -126,66 +256,85 @@ func (w *WAL) ReadAll(directory string) ([]model.Record, error) {
 		}
 
 		filePath := filepath.Join(directory, fileInfo.Name())
-		file, err := os.Open(filePath)
+		fileRecords, err := w.readSegment(filePath)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("Greska pri citanju WAL segmenta %s: %v", fileInfo.Name(), err)
 		}
-
-		for {
-			// 4 (crc32) + 8 (timestamp) + 1 (tombstone) + 8 (keySize) + 8 (valSize) = 29
-			header := make([]byte, 29)
-			_, err := io.ReadFull(file, header)
-			if err == io.EOF {
-				break
-			} else if err != nil {
-				file.Close()
-				return nil, fmt.Errorf("greska pri citanju zaglavlja iz %s: %v", fileInfo.Name(), err)
-			}
-			savedCRC := binary.LittleEndian.Uint32(header[0:4])
-			// Parsiramo zaglavlje
-			timestampNano := binary.LittleEndian.Uint64(header[4:12])
-			tombstone := header[12] == 1
-			keySize := binary.LittleEndian.Uint64(header[13:21])
-			valSize := binary.LittleEndian.Uint64(header[21:29])
-
-			// Citamo kljuc na osnovu procitane velicine
-			keyBytes := make([]byte, keySize)
-			_, err = io.ReadFull(file, keyBytes)
-			if err != nil {
-				file.Close()
-				return nil, err
-			}
-
-			// Citamo vrednost na osnovu procitane velicine
-			valBytes := make([]byte, valSize)
-			_, err = io.ReadFull(file, valBytes)
-			if err != nil {
-				file.Close()
-				return nil, err
-			}
-
-			dataForCRC := append(header[4:], keyBytes...)
-			dataForCRC = append(dataForCRC, valBytes...)
-			calculatedCRC := crc32.ChecksumIEEE(dataForCRC)
-
-			if savedCRC != calculatedCRC {
-				file.Close()
-				return nil, fmt.Errorf("greska pri citanju WAL fajla %s: CRC mismatch (ocekivano %08x, izracunato %08x)", fileInfo.Name(), savedCRC, calculatedCRC)
-			}
-
-			// Pakujemo sve nazad u Record strukturu
-			record := model.Record{
-				Key:       string(keyBytes),
-				Value:     valBytes,
-				Tombstone: tombstone,
-				Timestamp: time.Unix(0, int64(timestampNano)),
-			}
-
-			records = append(records, record)
-		}
-
-		file.Close()
+		records = append(records, fileRecords...)
 	}
 
+	return records, nil
+}
+
+func (w *WAL) readSegment(filePath string) ([]model.Record, error) {
+	var records []model.Record
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("Greska pri otvaranju WAL fajla: %v", err)
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("Greska pri citanju informaciju o WAL fajlu: %v", err)
+	}
+	fileSize := fileInfo.Size()
+
+	var assembleBuffer []byte
+
+	for fileOffset := int64(0); fileOffset < fileSize; {
+		blockData := make([]byte, w.BlockSize)
+		n, err := file.ReadAt(blockData, fileOffset)
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("Greska pri citanju bloka: %v", err)
+		}
+		blockData = blockData[:n] // Samo koliko je stvarno procitano
+		fileOffset += int64(w.BlockSize)
+		// Parsiranje fragmenata unutar bloka
+		position := 0 // Pozicija unutar jednog bloka
+		for position+FragHeader <= len(blockData) {
+			fragType := blockData[position]
+			savedCRC := binary.LittleEndian.Uint32(blockData[position+1 : position+5])
+			dataLen := int(binary.LittleEndian.Uint16(blockData[position+5 : position+7]))
+			if fragType == 0 && savedCRC == 0 && dataLen == 0 {
+				break // Padding do kraja bloka, pa se prelazi na sledeci
+			}
+
+			position += FragHeader
+
+			if position+dataLen > len(blockData) {
+				break // Neispravan fragment
+			}
+
+			fragData := make([]byte, dataLen)
+			copy(fragData, blockData[position:position+dataLen])
+			position += dataLen
+			// Provera CRC
+			calculatedCRC := crc32.ChecksumIEEE(fragData)
+			if savedCRC != calculatedCRC {
+				return nil, fmt.Errorf("CRC se ne podudara u fajlu %s", filePath)
+			}
+			// Sastavljanje zapisa na osnovu fragmenta
+			switch fragType {
+			case FragFull:
+				record := deserializeRecord(fragData)
+				records = append(records, record)
+
+			case FragFirst:
+				assembleBuffer = make([]byte, 0)
+				assembleBuffer = append(assembleBuffer, fragData...)
+
+			case FragMiddle:
+				assembleBuffer = append(assembleBuffer, fragData...)
+
+			case FragLast:
+				assembleBuffer = append(assembleBuffer, fragData...)
+				record := deserializeRecord(assembleBuffer)
+				records = append(records, record)
+				assembleBuffer = nil
+			}
+		}
+	}
 	return records, nil
 }

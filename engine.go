@@ -63,7 +63,7 @@ func NewKVEngine(dataDir string, configPath string) (*KVEngine, error) {
 	}
 
 	// Inicijalizacija WAL-a
-	w, err := wal.NewWAL(dataDir, cfg.WalSegmentSize)
+	w, err := wal.NewWAL(dataDir, cfg.BlockSize, cfg.WalBlockCount)
 	if err != nil {
 		return nil, fmt.Errorf("greska pri inicijalizaciji WAL-a: %v", err)
 	}
