@@ -6,7 +6,6 @@ import (
 	"github.com/Stiroki/Key-Value-Engine/block"
 )
 
-// Record predstavlja jedan podatak koji nam prosledjuje Memtable
 type Record struct {
 	Key       string
 	Value     []byte
@@ -14,7 +13,11 @@ type Record struct {
 	Timestamp int64
 }
 
-// BMWriter sakuplja podatke u buffer i upisuje ih na disk koristeci Block Manager, buffer je velicine block-a
+type summaryEntry struct {
+	key         []byte
+	indexOffset int64
+}
+
 type BMWriter struct {
 	filepath   string
 	bm         *block.BlockManager
@@ -38,13 +41,12 @@ func (w *BMWriter) Write(p []byte) (n int, err error) {
 		spaceInBuf := w.bm.BlockSize - len(w.buffer)
 
 		if spaceInBuf == 0 {
-			// Saljemo ceo blok na disk
 			err = w.bm.WriteBlock(w.filepath, w.blockIndex, w.buffer)
 			if err != nil {
 				return written, err
 			}
 			w.blockIndex++
-			w.buffer = w.buffer[:0] // Praznimo buffer za sledeci blok
+			w.buffer = w.buffer[:0]
 			spaceInBuf = w.bm.BlockSize
 		}
 
@@ -61,7 +63,6 @@ func (w *BMWriter) Write(p []byte) (n int, err error) {
 	return written, nil
 }
 
-// Flush se poziva na kraju kako bi se upisali preostali podaci koji nisu uspeli da napune ceo blok
 func (w *BMWriter) Flush() error {
 	if len(w.buffer) > 0 {
 		err := w.bm.WriteBlock(w.filepath, w.blockIndex, w.buffer)
@@ -83,9 +84,12 @@ type SSTableBuilder struct {
 	summaryFile *BMWriter
 
 	bloomFilter *BloomFilter
-	merkleVals  [][]byte // Skupljamo vrednosti za Merkle stablo
+	merkleVals  [][]byte
 
 	indexEntryCount int
+	firstKey        string
+	lastKey         string
+	summaryEntries  []summaryEntry
 }
 
 func NewSSTableBuilder(basePath string, summaryDegree int, expectedElements int, falsePositiveRate float64, bm *block.BlockManager) (*SSTableBuilder, error) {
@@ -98,17 +102,22 @@ func NewSSTableBuilder(basePath string, summaryDegree int, expectedElements int,
 		indexFile:   NewBMWriter(basePath+"-Index.db", bm),
 		summaryFile: NewBMWriter(basePath+"-Summary.db", bm),
 
-		bloomFilter: NewBloomFilter(expectedElements, falsePositiveRate),
-		merkleVals:  make([][]byte, 0),
+		bloomFilter:    NewBloomFilter(expectedElements, falsePositiveRate),
+		merkleVals:     make([][]byte, 0),
+		summaryEntries: make([]summaryEntry, 0),
 	}, nil
 }
 
 func (b *SSTableBuilder) WriteRecord(rec *Record) error {
 	dataOffset := b.dataFile.Offset
 
+	if b.indexEntryCount == 0 {
+		b.firstKey = rec.Key
+	}
+	b.lastKey = rec.Key
+
 	b.bloomFilter.Add([]byte(rec.Key))
 
-	// Cuva vrednost za Merkle stablo
 	if !rec.Tombstone && rec.Value != nil {
 		b.merkleVals = append(b.merkleVals, rec.Value)
 	}
@@ -123,9 +132,10 @@ func (b *SSTableBuilder) WriteRecord(rec *Record) error {
 	}
 
 	if b.indexEntryCount%b.SummaryDegree == 0 {
-		if err := b.writeSummaryEntry([]byte(rec.Key), indexOffset); err != nil {
-			return err
-		}
+		b.summaryEntries = append(b.summaryEntries, summaryEntry{
+			key:         []byte(rec.Key),
+			indexOffset: indexOffset,
+		})
 	}
 	b.indexEntryCount++
 
@@ -175,21 +185,6 @@ func (b *SSTableBuilder) writeIndexEntry(key []byte, dataOffset int64) error {
 	return nil
 }
 
-func (b *SSTableBuilder) writeSummaryEntry(key []byte, indexOffset int64) error {
-	keyLen := uint64(len(key))
-	if err := binary.Write(b.summaryFile, binary.LittleEndian, keyLen); err != nil {
-		return err
-	}
-	if _, err := b.summaryFile.Write(key); err != nil {
-		return err
-	}
-	if err := binary.Write(b.summaryFile, binary.LittleEndian, indexOffset); err != nil {
-		return err
-	}
-	return nil
-}
-
-// Finish osigurava da su svi nezavrseni blokovi izbaceni na disk i generise Bloom filter
 func (b *SSTableBuilder) Finish() error {
 	if err := b.dataFile.Flush(); err != nil {
 		return err
@@ -197,12 +192,46 @@ func (b *SSTableBuilder) Finish() error {
 	if err := b.indexFile.Flush(); err != nil {
 		return err
 	}
+
+	// 1. Zapis Min i Max granica na početak Summary fajla
+	minKeyBytes := []byte(b.firstKey)
+	minKeyLen := uint64(len(minKeyBytes))
+	if err := binary.Write(b.summaryFile, binary.LittleEndian, minKeyLen); err != nil {
+		return err
+	}
+	if _, err := b.summaryFile.Write(minKeyBytes); err != nil {
+		return err
+	}
+
+	maxKeyBytes := []byte(b.lastKey)
+	maxKeyLen := uint64(len(maxKeyBytes))
+	if err := binary.Write(b.summaryFile, binary.LittleEndian, maxKeyLen); err != nil {
+		return err
+	}
+	if _, err := b.summaryFile.Write(maxKeyBytes); err != nil {
+		return err
+	}
+
+	// 2. Zapis proređenih stavki indeksa
+	for _, entry := range b.summaryEntries {
+		kLen := uint64(len(entry.key))
+		if err := binary.Write(b.summaryFile, binary.LittleEndian, kLen); err != nil {
+			return err
+		}
+		if _, err := b.summaryFile.Write(entry.key); err != nil {
+			return err
+		}
+		if err := binary.Write(b.summaryFile, binary.LittleEndian, entry.indexOffset); err != nil {
+			return err
+		}
+	}
+
 	if err := b.summaryFile.Flush(); err != nil {
 		return err
 	}
 
+	// 3. Bloom filter serijalizacija
 	bloomWriter := NewBMWriter(b.BasePath+"-Filter.db", b.BM)
-
 	m := uint64(b.bloomFilter.M)
 	k := uint64(b.bloomFilter.K)
 
@@ -216,7 +245,6 @@ func (b *SSTableBuilder) Finish() error {
 		return err
 	}
 
-	// Flush i za Bloom filter
 	if err := bloomWriter.Flush(); err != nil {
 		return err
 	}

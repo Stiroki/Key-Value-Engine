@@ -62,8 +62,12 @@ func NewKVEngine(dataDir string, configPath string) (*KVEngine, error) {
 		return nil, fmt.Errorf("greska pri ucitavanju konfiguracije: %v", err)
 	}
 
-	// Inicijalizacija WAL-a
-	w, err := wal.NewWAL(dataDir, cfg.BlockSize, cfg.WalBlockCount)
+	// Inicijalizacija LRU Cache-a i BlockManager-a
+	c := cache.NewLRUCache(cfg.CacheSize)
+	bm := block.NewBlockManager(cfg.BlockSize, c)
+
+	// Inicijalizacija WAL-a preko BlockManager-a
+	w, err := wal.NewWAL(dataDir, cfg.BlockSize, cfg.WalBlockCount, bm)
 	if err != nil {
 		return nil, fmt.Errorf("greska pri inicijalizaciji WAL-a: %v", err)
 	}
@@ -80,11 +84,6 @@ func NewKVEngine(dataDir string, configPath string) (*KVEngine, error) {
 	} else {
 		fmt.Printf("[UPOZORENJE] Greška pri citanju WAL-a: %v\n", err)
 	}
-
-	// Inicijalizacija LRU Cache-a
-	c := cache.NewLRUCache(cfg.CacheSize)
-
-	bm := block.NewBlockManager(cfg.BlockSize, c)
 
 	// KREIRANJE ENGINE OBJEKTA
 	engine := &KVEngine{
@@ -267,10 +266,10 @@ func (e *KVEngine) BuildSSTable(records []*model.Record) error {
 
 	mTree := sstable.NewMerkleTree(valuesForMerkle)
 
-	// Ako stablo nije prazno, snimamo Root Hash u poseban fajl
+	// Ako stablo nije prazno, snimamo serijalizovane metapodatke stabla
 	if mTree.Root != nil {
 		metadataPath := basePath + "-Metadata.txt"
-		err = os.WriteFile(metadataPath, mTree.Root.Hash, 0644)
+		err = os.WriteFile(metadataPath, mTree.Serialize(), 0644)
 		if err != nil {
 			fmt.Printf("[UPOZORENJE] Greška pri snimanju Merkle stabla: %v\n", err)
 		}
@@ -281,21 +280,30 @@ func (e *KVEngine) BuildSSTable(records []*model.Record) error {
 }
 
 // ValidateSSTable proverava integritet SSTabele koristeci Merkle stablo
+// ValidateSSTable proverava integritet SSTabele koristeci Merkle stablo
 func (e *KVEngine) ValidateSSTable(tableNum int) {
 	basePath := fmt.Sprintf("%s/usertable-%d", e.DataDir, tableNum)
 	metadataPath := basePath + "-Metadata.txt"
 
-	savedHash, err := os.ReadFile(metadataPath)
+	metaFile, err := os.Open(metadataPath)
 	if err != nil {
 		fmt.Printf("[GREŠKA] Ne mogu da pronađem Metadata fajl za tabelu %d. (Da li tabela uopšte postoji?)\n", tableNum)
 		return
 	}
+	defer metaFile.Close()
 
-	fmt.Println("[SISTEM] Započinjem čitanje fajla i rekonstrukciju Merkle stabla...")
+	savedRootHash, savedLeaves, err := sstable.DeserializeMerkleMetadata(metaFile)
+	if err != nil {
+		fmt.Printf("[GREŠKA] Neuspešno čitanje Merkle metapodataka: %v\n", err)
+		return
+	}
+
+	fmt.Println("[SISTEM] Započinjem čitanje Data fajla i rekonstrukciju Merkle stabla...")
 
 	// Otvaramo fajl preko Block Managera
 	file := sstable.NewBMReader(basePath+"-Data.db", e.BlockManager)
 	var valuesForMerkle [][]byte
+	var recordKeys []string
 
 	// Citamo sve podatke sekvencijalno
 	for {
@@ -310,37 +318,67 @@ func (e *KVEngine) ValidateSSTable(tableNum int) {
 			return
 		}
 
-		binary.Read(file, binary.LittleEndian, &valLen)
+		if err := binary.Read(file, binary.LittleEndian, &valLen); err != nil {
+			fmt.Printf("[GREŠKA] Problem pri čitanju dužine vrednosti: %v\n", err)
+			return
+		}
 
 		keyBytes := make([]byte, keyLen)
-		io.ReadFull(file, keyBytes)
+		if _, err := io.ReadFull(file, keyBytes); err != nil {
+			fmt.Printf("[GREŠKA] Problem pri čitanju ključa: %v\n", err)
+			return
+		}
 
 		valBytes := make([]byte, valLen)
-		io.ReadFull(file, valBytes)
+		if valLen > 0 {
+			if _, err := io.ReadFull(file, valBytes); err != nil {
+				fmt.Printf("[GREŠKA] Problem pri čitanju vrednosti: %v\n", err)
+				return
+			}
+		}
 
 		var tombstone bool
-		binary.Read(file, binary.LittleEndian, &tombstone)
+		if err := binary.Read(file, binary.LittleEndian, &tombstone); err != nil {
+			fmt.Printf("[GREŠKA] Problem pri čitanju tombstone oznake: %v\n", err)
+			return
+		}
 
 		var timestamp int64
-		binary.Read(file, binary.LittleEndian, &timestamp)
+		if err := binary.Read(file, binary.LittleEndian, &timestamp); err != nil {
+			fmt.Printf("[GREŠKA] Problem pri čitanju timestamp-a: %v\n", err)
+			return
+		}
 
 		if !tombstone {
 			valuesForMerkle = append(valuesForMerkle, valBytes)
+			recordKeys = append(recordKeys, string(keyBytes))
 		}
 	}
 
 	// Pravimo novo Merkle stablo sa procitanim vrednostima
 	newTree := sstable.NewMerkleTree(valuesForMerkle)
-	var newHash []byte
+	var newRootHash []byte
 	if newTree.Root != nil {
-		newHash = newTree.Root.Hash
+		newRootHash = newTree.Root.Hash
 	}
 
-	// Poredjenje hash-eva
-	if bytes.Equal(savedHash, newHash) {
+	// Poredjenje Root hash-eva
+	if bytes.Equal(savedRootHash, newRootHash) {
 		fmt.Printf("\n>>> [USPEH] SSTabela %d je NETAKNUTA! Merkle Root se savršeno poklapa. <<<\n\n", tableNum)
 	} else {
-		fmt.Printf("\n>>> [KORUPCIJA] UPOZORENJE! Podaci u SSTabeli %d su izmenjeni ili oštećeni! <<<\n\n", tableNum)
+		fmt.Printf("\n>>> [KORUPCIJA] UPOZORENJE! Podaci u SSTabeli %d su izmenjeni ili oštećeni! <<<\n", tableNum)
+
+		// Pronalazak tačnih lokacija izmena
+		corruptedIndices := newTree.FindCorruptedIndices(savedLeaves)
+		fmt.Println("Detektovane izmene na sledećim zapisima:")
+		for _, idx := range corruptedIndices {
+			if idx < len(recordKeys) {
+				fmt.Printf(" - Zapis #%d (Ključ: '%s') je oštećen ili izmenjen.\n", idx+1, recordKeys[idx])
+			} else {
+				fmt.Printf(" - Zapis #%d (nedostaje ili je višak u odnosu na originalno stablo).\n", idx+1)
+			}
+		}
+		fmt.Println()
 	}
 }
 

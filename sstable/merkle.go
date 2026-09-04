@@ -1,7 +1,10 @@
 package sstable
 
 import (
+	"bytes"
 	"crypto/sha1"
+	"encoding/binary"
+	"io"
 )
 
 type MerkleNode struct {
@@ -11,7 +14,8 @@ type MerkleNode struct {
 }
 
 type MerkleTree struct {
-	Root *MerkleNode
+	Root   *MerkleNode
+	Leaves []*MerkleNode
 }
 
 // hashData racuna SHA-1 hash vrednost
@@ -27,15 +31,18 @@ func NewMerkleTree(values [][]byte) *MerkleTree {
 		return &MerkleTree{}
 	}
 
-	var nodes []*MerkleNode
-
+	var leaves []*MerkleNode
 	for _, val := range values {
-		nodes = append(nodes, &MerkleNode{
+		node := &MerkleNode{
 			Hash:  hashData(val),
 			Left:  nil,
 			Right: nil,
-		})
+		}
+		leaves = append(leaves, node)
 	}
+
+	nodes := make([]*MerkleNode, len(leaves))
+	copy(nodes, leaves)
 
 	// Gradjenje stabla dok ne ostane samo root
 	for len(nodes) > 1 {
@@ -43,7 +50,6 @@ func NewMerkleTree(values [][]byte) *MerkleTree {
 
 		for i := 0; i < len(nodes); i += 2 {
 			if i+1 < len(nodes) {
-				// Ako imamo par, spajamo levi i desni hash i ponovno hash-iramo
 				combinedHash := append(nodes[i].Hash, nodes[i+1].Hash...)
 				nextLevel = append(nextLevel, &MerkleNode{
 					Hash:  hashData(combinedHash),
@@ -57,5 +63,76 @@ func NewMerkleTree(values [][]byte) *MerkleTree {
 		nodes = nextLevel
 	}
 
-	return &MerkleTree{Root: nodes[0]}
+	return &MerkleTree{
+		Root:   nodes[0],
+		Leaves: leaves,
+	}
+}
+
+// Serialize čuva broj listova i heš svakog lista u bajtove
+func (m *MerkleTree) Serialize() []byte {
+	buf := new(bytes.Buffer)
+	if m.Root == nil {
+		return buf.Bytes()
+	}
+
+	// 1. Zapisujemo Root Hash (20 bajtova za SHA-1)
+	buf.Write(m.Root.Hash)
+
+	// 2. Broj listova
+	leafCount := uint32(len(m.Leaves))
+	binary.Write(buf, binary.LittleEndian, leafCount)
+
+	// 3. Heš svakog lista redom
+	for _, leaf := range m.Leaves {
+		buf.Write(leaf.Hash)
+	}
+
+	return buf.Bytes()
+}
+
+// Deserialize učitava Root Hash i listove iz sačuvanih metapodataka
+func DeserializeMerkleMetadata(r io.Reader) (rootHash []byte, leafHashes [][]byte, err error) {
+	rootHash = make([]byte, 20) // SHA-1 je 20 bajtova
+	if _, err := io.ReadFull(r, rootHash); err != nil {
+		return nil, nil, err
+	}
+
+	var leafCount uint32
+	if err := binary.Read(r, binary.LittleEndian, &leafCount); err != nil {
+		return nil, nil, err
+	}
+
+	leafHashes = make([][]byte, leafCount)
+	for i := uint32(0); i < leafCount; i++ {
+		leaf := make([]byte, 20)
+		if _, err := io.ReadFull(r, leaf); err != nil {
+			return nil, nil, err
+		}
+		leafHashes[i] = leaf
+	}
+
+	return rootHash, leafHashes, nil
+}
+
+// CompareTrees upoređuje sačuvane listove sa novim stablom i vraća indekse oštećenih zapisa
+func (m *MerkleTree) FindCorruptedIndices(savedLeafHashes [][]byte) []int {
+	var corrupted []int
+
+	maxLen := len(savedLeafHashes)
+	if len(m.Leaves) > maxLen {
+		maxLen = len(m.Leaves)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		if i >= len(savedLeafHashes) || i >= len(m.Leaves) {
+			corrupted = append(corrupted, i)
+			continue
+		}
+		if !bytes.Equal(savedLeafHashes[i], m.Leaves[i].Hash) {
+			corrupted = append(corrupted, i)
+		}
+	}
+
+	return corrupted
 }

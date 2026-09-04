@@ -128,8 +128,35 @@ func (r *SSTableReader) Find(searchKey string) (*Record, error) {
 
 func (r *SSTableReader) searchSummary(searchKey []byte) (int64, error) {
 	file := NewBMReader(r.BasePath+"-Summary.db", r.BM)
+
+	// 1. Pročitaj Min Key
+	var minLen uint64
+	if err := binary.Read(file, binary.LittleEndian, &minLen); err != nil {
+		return -1, err
+	}
+	minKey := make([]byte, minLen)
+	if _, err := io.ReadFull(file, minKey); err != nil {
+		return -1, err
+	}
+
+	// 2. Pročitaj Max Key
+	var maxLen uint64
+	if err := binary.Read(file, binary.LittleEndian, &maxLen); err != nil {
+		return -1, err
+	}
+	maxKey := make([]byte, maxLen)
+	if _, err := io.ReadFull(file, maxKey); err != nil {
+		return -1, err
+	}
+
+	// Provera granica opsega
+	if bytes.Compare(searchKey, minKey) < 0 || bytes.Compare(searchKey, maxKey) > 0 {
+		return -1, nil // Ključ je van opsega ove tabele!
+	}
+
 	var lastValidIndexOffset int64 = 0
 
+	// 3. Traženje odgovarajućeg segmenta u Index fajlu
 	for {
 		var keyLen uint64
 		err := binary.Read(file, binary.LittleEndian, &keyLen)
