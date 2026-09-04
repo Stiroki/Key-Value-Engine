@@ -81,7 +81,10 @@ func (m *MerkleTree) Serialize() []byte {
 
 	// 2. Broj listova
 	leafCount := uint32(len(m.Leaves))
-	binary.Write(buf, binary.LittleEndian, leafCount)
+	err := binary.Write(buf, binary.LittleEndian, leafCount)
+	if err != nil {
+		return nil
+	}
 
 	// 3. Heš svakog lista redom
 	for _, leaf := range m.Leaves {
@@ -91,7 +94,7 @@ func (m *MerkleTree) Serialize() []byte {
 	return buf.Bytes()
 }
 
-// Deserialize učitava Root Hash i listove iz sačuvanih metapodataka
+// DeserializeMerkleMetadata učitava Root Hash i listove iz sačuvanih metapodataka
 func DeserializeMerkleMetadata(r io.Reader) (rootHash []byte, leafHashes [][]byte, err error) {
 	rootHash = make([]byte, 20) // SHA-1 je 20 bajtova
 	if _, err := io.ReadFull(r, rootHash); err != nil {

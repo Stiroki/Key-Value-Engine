@@ -28,21 +28,18 @@ func (r *BMReader) Read(p []byte) (n int, err error) {
 		return 0, nil
 	}
 
-	// Racunamo u kom bloku se nalazimo i koji je offset u tom specificnom bloku
 	blockIdx := int(r.offset) / r.bm.BlockSize
 	offsetInBlock := int(r.offset) % r.bm.BlockSize
 
-	// Citamo blok preko Block Managera (ovo proverava cache pa onda disk)
 	blockData, err := r.bm.ReadBlock(r.filepath, blockIdx)
 	if err != nil {
 		return 0, err
 	}
 
-	if offsetInBlock >= len(blockData) {
+	if len(blockData) == 0 || offsetInBlock >= len(blockData) {
 		return 0, io.EOF
 	}
 
-	// Kopiramo podatke iz block-a u buffer
 	n = copy(p, blockData[offsetInBlock:])
 	r.offset += int64(n)
 	return n, nil

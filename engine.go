@@ -280,7 +280,6 @@ func (e *KVEngine) BuildSSTable(records []*model.Record) error {
 }
 
 // ValidateSSTable proverava integritet SSTabele koristeci Merkle stablo
-// ValidateSSTable proverava integritet SSTabele koristeci Merkle stablo
 func (e *KVEngine) ValidateSSTable(tableNum int) {
 	basePath := fmt.Sprintf("%s/usertable-%d", e.DataDir, tableNum)
 	metadataPath := basePath + "-Metadata.txt"
@@ -290,7 +289,12 @@ func (e *KVEngine) ValidateSSTable(tableNum int) {
 		fmt.Printf("[GREŠKA] Ne mogu da pronađem Metadata fajl za tabelu %d. (Da li tabela uopšte postoji?)\n", tableNum)
 		return
 	}
-	defer metaFile.Close()
+	defer func(metaFile *os.File) {
+		err := metaFile.Close()
+		if err != nil {
+
+		}
+	}(metaFile)
 
 	savedRootHash, savedLeaves, err := sstable.DeserializeMerkleMetadata(metaFile)
 	if err != nil {
@@ -300,53 +304,52 @@ func (e *KVEngine) ValidateSSTable(tableNum int) {
 
 	fmt.Println("[SISTEM] Započinjem čitanje Data fajla i rekonstrukciju Merkle stabla...")
 
-	// Otvaramo fajl preko Block Managera
 	file := sstable.NewBMReader(basePath+"-Data.db", e.BlockManager)
 	var valuesForMerkle [][]byte
 	var recordKeys []string
 
-	// Citamo sve podatke sekvencijalno
 	for {
-		var keyLen, valLen uint64
-
+		var keyLen uint64
 		err := binary.Read(file, binary.LittleEndian, &keyLen)
-		if err == io.EOF {
+		if err != nil {
+			break // Kraj fajla ili EOF
+		}
+
+		// Ako smo naišli na padding nule na kraju bloka ili nerealnu veličinu ključa
+		if keyLen == 0 || keyLen > 65536 {
 			break
 		}
-		if err != nil {
-			fmt.Printf("[GREŠKA] Problem pri čitanju Data fajla: %v\n", err)
-			return
+
+		var valLen uint64
+		if err := binary.Read(file, binary.LittleEndian, &valLen); err != nil {
+			break
 		}
 
-		if err := binary.Read(file, binary.LittleEndian, &valLen); err != nil {
-			fmt.Printf("[GREŠKA] Problem pri čitanju dužine vrednosti: %v\n", err)
-			return
+		if valLen > 100*1024*1024 { // Zaštita od nerealne veličine vrednosti
+			break
 		}
 
 		keyBytes := make([]byte, keyLen)
 		if _, err := io.ReadFull(file, keyBytes); err != nil {
-			fmt.Printf("[GREŠKA] Problem pri čitanju ključa: %v\n", err)
-			return
+			break
 		}
 
-		valBytes := make([]byte, valLen)
+		var valBytes []byte
 		if valLen > 0 {
+			valBytes = make([]byte, valLen)
 			if _, err := io.ReadFull(file, valBytes); err != nil {
-				fmt.Printf("[GREŠKA] Problem pri čitanju vrednosti: %v\n", err)
-				return
+				break
 			}
 		}
 
 		var tombstone bool
 		if err := binary.Read(file, binary.LittleEndian, &tombstone); err != nil {
-			fmt.Printf("[GREŠKA] Problem pri čitanju tombstone oznake: %v\n", err)
-			return
+			break
 		}
 
 		var timestamp int64
 		if err := binary.Read(file, binary.LittleEndian, &timestamp); err != nil {
-			fmt.Printf("[GREŠKA] Problem pri čitanju timestamp-a: %v\n", err)
-			return
+			break
 		}
 
 		if !tombstone {
@@ -355,20 +358,17 @@ func (e *KVEngine) ValidateSSTable(tableNum int) {
 		}
 	}
 
-	// Pravimo novo Merkle stablo sa procitanim vrednostima
 	newTree := sstable.NewMerkleTree(valuesForMerkle)
 	var newRootHash []byte
 	if newTree.Root != nil {
 		newRootHash = newTree.Root.Hash
 	}
 
-	// Poredjenje Root hash-eva
 	if bytes.Equal(savedRootHash, newRootHash) {
 		fmt.Printf("\n>>> [USPEH] SSTabela %d je NETAKNUTA! Merkle Root se savršeno poklapa. <<<\n\n", tableNum)
 	} else {
 		fmt.Printf("\n>>> [KORUPCIJA] UPOZORENJE! Podaci u SSTabeli %d su izmenjeni ili oštećeni! <<<\n", tableNum)
 
-		// Pronalazak tačnih lokacija izmena
 		corruptedIndices := newTree.FindCorruptedIndices(savedLeaves)
 		fmt.Println("Detektovane izmene na sledećim zapisima:")
 		for _, idx := range corruptedIndices {
@@ -381,7 +381,6 @@ func (e *KVEngine) ValidateSSTable(tableNum int) {
 		fmt.Println()
 	}
 }
-
 func (e *KVEngine) SaveTokenBucketState() {
 	record := &model.Record{
 		Key:       tokenBucketKey,
