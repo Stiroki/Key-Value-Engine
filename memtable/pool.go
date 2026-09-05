@@ -74,6 +74,9 @@ func (p *MemtablePool) PutDirect(record *model.Record) {
 		newTable := NewMemtable(p.Capacity, p.StructType, p.WAL)
 		p.Tables = append([]*Memtable{newTable}, p.Tables...)
 	}
+	if len(p.Tables) >= p.MaxInstances {
+		p.FlushAll()
+	}
 }
 
 func (p *MemtablePool) FlushAll() error {
